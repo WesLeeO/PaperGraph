@@ -89,6 +89,7 @@ def main() -> None:
                 conn.execute(drop_index)
             # Unit vectors (the encoders normalize), so cosine similarity = dot product.
             vectors = encoder.encode_papers([(t, a) for _, t, a in rows], batch_size)
+            # loading rows into a table
             with conn.transaction(), conn.cursor() as cur, cur.copy(copy_sql) as copy:
                 copy.set_types(["text", "vector"])
                 for (paper_id, _, _), vec in zip(rows, vectors, strict=True):

@@ -181,72 +181,113 @@
 </div>
 
 <script>
+// $('name').whateverrr
+// $("q") = the HTML element with id="q"
 const $ = (id) => document.getElementById(id);
+// Escape HTML special characters so API text can't inject code (XSS)
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+// Papers fetched per infinite-scroll page
 const PAGE = 20;
 
 // ---------- paper cards ----------
+// Build and return the <article> element for one paper
 function paperCard(p, rank, idPrefix = "paper-") {
+  // "2024-05-17" -> "2024"
   const year = (p.published || "").slice(0, 4);
+  // First 4 authors, then "et al."
   const authors = p.authors.slice(0, 4).join(", ") + (p.authors.length > 4 ? " et al." : "");
+  // Venue badge HTML, or "" if no venue
   const venue = p.venue ? `<span class="badge">${esc(p.venue)} ${esc(p.venue_year || "")}</span>` : "";
+  // Abstracts over 300 chars get cut with a "more" link
   const long = p.abstract.length > 300;
+  // New element, not on the page yet
   const el = document.createElement("article");
+  // CSS class for the card style
   el.className = "card";
+  // id so links can jump to it (#paper-2401.01234)
   el.id = idPrefix + p.id;
+  // Card content: title line, byline, abstract
   el.innerHTML = `
     <h3>${rank ? `<span class="rank">${rank}</span>` : ""}<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.title || "(untitled)")}</a>${venue}</h3>
     <div class="byline">${esc(authors || "unknown authors")}${year ? " · " + esc(year) : ""} · ${esc(p.id)}${p.categories.length ? " · " + esc(p.categories.slice(0, 3).join(", ")) : ""}</div>
     ${p.abstract ? `<div class="abstract"><span class="text">${esc(long ? p.abstract.slice(0, 300) + "…" : p.abstract)}</span>${long ? '<span class="more">more</span>' : ""}</div>` : ""}`;
+  // The "more" link inside this card (null if none)
   const more = el.querySelector(".more");
+  // Clicking "more" shows the full abstract and removes the link
   if (more) more.addEventListener("click", () => { el.querySelector(".text").textContent = p.abstract; more.remove(); });
+  // Caller inserts it into the page
   return el;
 }
 
 // ---------- filters ----------
+// Selected venue and category chips (Set = no duplicates)
 const sel = { venues: new Set(), categories: new Set() };
+// Add a clickable chip to `box` that toggles `name` in `set`
 function chip(box, name, set, label) {
+  // New <span> element
   const c = document.createElement("span");
+  // Chip style and text
   c.className = "chip"; c.textContent = label || name;
+  // Click: toggle selection, highlight, update the counter
   c.addEventListener("click", () => { set.has(name) ? set.delete(name) : set.add(name); c.classList.toggle("on", set.has(name)); updateFilterCount(); });
+  // Put the chip on the page
   box.appendChild(c);
 }
+// Number of active filters (non-empty fields + selected chips)
 function activeFilters() {
   return [$("author").value.trim(), $("year-from").value, $("year-to").value].filter(Boolean).length + sel.venues.size + sel.categories.size;
 }
+// Show that number as a badge on the Filters button
 function updateFilterCount() {
   const n = activeFilters();
   $("filter-count").innerHTML = n ? `<span class="count-badge">${n}</span>` : "";
 }
+// For each filter text field:
 ["author", "year-from", "year-to"].forEach((id) => {
+  // Update the badge on every keystroke
   $(id).addEventListener("input", updateFilterCount);
+  // Enter runs the search
   $(id).addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); $("form").requestSubmit(); } });
 });
+// Filters button shows/hides the panel
 $("toggle-filters").addEventListener("click", () => $("filters").classList.toggle("hidden"));
+// Clear button resets all filters
 $("clear-filters").addEventListener("click", () => {
+  // Empty the text fields
   ["author", "year-from", "year-to"].forEach((id) => ($(id).value = ""));
+  // Forget selected chips
   sel.venues.clear(); sel.categories.clear();
+  // Un-highlight them
   document.querySelectorAll(".chip.on").forEach((c) => c.classList.remove("on"));
   updateFilterCount();
 });
 
+// False if the server says the agent can't run
 let agentAvailable = true;
+// On load: get venues, categories, corpus size and agent status from the API
 fetch("/api/meta").then((r) => r.json()).then((m) => {
+  // One chip per top-17 venue, "name · count"
   m.venues.slice(0, 17).forEach((v) => chip($("venues"), v.name, sel.venues, `${v.name} · ${v.count.toLocaleString()}`));
+  // One chip per category
   m.categories.forEach((c) => chip($("categories"), c, sel.categories));
+  // Corpus size and newest date in the sidebar
   $("corpus").innerHTML = `${m.papers.toLocaleString()} arXiv ML papers<br>up to ${esc(m.latest || "?")}`;
+  // Agent unavailable: disable its button and show why
   if (m.agent && !m.agent.available) {
     agentAvailable = false;
     $("agent-btn").disabled = true;
     $("agent-hint").innerHTML = `<span class="warn">Agent unavailable: ${esc(m.agent.message)}</span>`;
   }
+// Request failed: say the database is unavailable
 }).catch(() => { $("corpus").innerHTML = '<span class="warn">database unavailable</span>'; });
 
 // ---------- search with infinite scroll ----------
 let state = null;  // {params, nextOffset, loading, token}
 let token = 0;     // bumps on every new search: stale responses are dropped
 
+// Build the query string (q=...&year_from=...) from the box and filters
 function searchParams() {
+  // Builds and escapes "a=1&b=2"
   const p = new URLSearchParams();
   const q = $("q").value.trim(), author = $("author").value.trim();
   if (q) p.set("q", q);
@@ -254,41 +295,58 @@ function searchParams() {
   const yf = $("year-from").value, yt = $("year-to").value;
   if (yf) p.set("year_from", yf);
   if (yt) p.set("year_to", yt);
+  // [...set] = Set to array
   if (sel.venues.size) p.set("venues", [...sel.venues].join(","));
   if (sel.categories.size) p.set("categories", [...sel.categories].join(","));
   return p;
 }
 
+// Fetch the next 20 results and append them (async: can `await` without freezing the page)
 async function loadPage() {
+  // Skip if no search, already loading, or no more results
   if (!state || state.loading || state.nextOffset === null) return;
   state.loading = true;
+  // Which search this request belongs to, and its offset
   const my = state.token, offset = state.nextOffset;
+  // Search params plus page position and size
   const params = new URLSearchParams(state.params);
   params.set("offset", offset); params.set("limit", PAGE);
+  // Spinner on the first page
   if (offset === 0) $("meta").innerHTML = '<span class="spinner"></span>Searching…';
   try {
+    // GET /api/search (api_search in main.py)
     const r = await fetch("/api/search?" + params);
+    // Parse JSON, {} if invalid
     const body = await r.json().catch(() => ({}));
     if (my !== token) return;  // a newer search started meanwhile
+    // HTTP error: throw FastAPI's message, caught below
     if (!r.ok) throw new Error(typeof body.detail === "string" ? body.detail : (body.detail?.[0]?.msg || r.statusText));
+    // First page: summary line and chips
     if (offset === 0) renderMeta(body);
+    // One card per paper, appended to the list
     body.papers.forEach((p, i) => $("results").appendChild(paperCard(p, offset + i + 1)));
+    // Next page start (null = end)
     state.nextOffset = body.next_offset;
+    // Last page: show "End of results"
     if (body.next_offset === null && body.total > 0) {
       $("end").textContent = `End of results · ${body.total.toLocaleString()} papers`;
       $("end").classList.remove("hidden");
     }
   } catch (err) {
+    // Ignore errors from an old search
     if (my !== token) return;
+    // Stop paging and show the error
     state.nextOffset = null;
     $("meta").innerHTML = `<span class="warn">Search failed: ${esc(err.message)}</span>`;
   } finally {
+    // Runs in every case: allow the next page
     if (my === token) state.loading = false;
   }
   // Short first pages may not fill the screen: keep loading while the sentinel is visible.
   if (my === token && state.nextOffset !== null && sentinelVisible()) loadPage();
 }
 
+// Year range as text: "2023", "2021–2024", "since 2022", "until 2020"
 function yearLabel(from, to) {
   if (from && to) return from === to ? `${from}` : `${from}–${to}`;
   return from ? `since ${from}` : `until ${to}`;
@@ -296,130 +354,207 @@ function yearLabel(from, to) {
 
 // What the query was understood as: one removable chip per parsed part.
 function renderUnderstood(b) {
+  // u = parsed query; chips = [kind, label, value] list
   const u = b.understood, chips = [];
   if (u.author) {
+    // Best matching author in the database
     const top = b.matched_authors[0];
     chips.push(["author", "Author", top ? `${top.name} (${top.papers})` : u.author]);
   }
   if (u.venues.length) chips.push(["venue", "Venue", u.venues.join(", ") + (u.venue_year ? ` ${u.venue_year}` : "")]);
   if (u.year_from || u.year_to) chips.push(["year", "Year", yearLabel(u.year_from, u.year_to)]);
   if (u.arxiv_id) chips.push(["id", "arXiv", u.arxiv_id]);
+  // Remove the previous chips
   $("understood").innerHTML = "";
+  // Loop over chips, unpacking each triple
   for (const [kind, label, value] of chips) {
     const c = document.createElement("span");
     c.className = "uchip";
+    // Label, value and a × button
     c.innerHTML = `<span class="k">${esc(label)}</span><span>${esc(value)}</span><button type="button" title="Search these words as a topic instead" aria-label="Remove">×</button>`;
+    // × reruns the search without parsing this part
     c.querySelector("button").addEventListener("click", () => startSearch([...state.skip, kind]));
     $("understood").appendChild(c);
   }
 }
 
+// Summary line above the results
 function renderMeta(b) {
   renderUnderstood(b);
   const u = b.understood;
+  // Mention the topic only if the query also had an author, venue, year or id
   const topic = u.topic && (u.author || u.venues.length || u.venue_year || u.year_from || u.year_to || u.arxiv_id)
     ? ` on “${esc(u.topic)}”` : "";
+  // Author asked for but not found
   if (b.author && !b.matched_authors.length) {
     $("meta").innerHTML = `<span class="warn">No author matching “${esc(b.author)}”.</span> Check the spelling or try the surname alone.`;
+  // No results
   } else if (!b.total) {
     $("meta").textContent = "No papers found. Try other words, or remove a filter.";
   } else {
+    // Relevance order with a topic, date order without
     const order = b.author ? (u.topic ? "ranked by relevance" : "newest first")
       : (u.topic ? "keyword + semantic search" : "newest first");
     $("meta").innerHTML = `${b.total.toLocaleString()} papers${topic} · ${order} · ${b.ms} ms`;
   }
 }
 
+// True if the sentinel (empty element after the results) is within 600 px of the screen
 const sentinelVisible = () => $("sentinel").getBoundingClientRect().top < window.innerHeight + 600;
+// Browser calls this when the sentinel comes near the screen: load the next page
 new IntersectionObserver((entries) => { if (entries[0].isIntersecting) loadPage(); }, { rootMargin: "600px" }).observe($("sentinel"));
 
+// Start a new search; `skip` = query parts not to parse
 function startSearch(skip = []) {
   const params = searchParams();
+  // Nothing to search: focus the box
   if (!params.get("q") && !params.get("author")) { $("q").focus(); return; }
   if (skip.length) params.set("skip", skip.join(","));
+  // New search id: old responses will be ignored
   token += 1;
   state = { params: params.toString(), skip, nextOffset: 0, loading: false, token };
+  // Hide welcome text, clear old results
   $("welcome").classList.add("hidden");
   $("results").innerHTML = ""; $("understood").innerHTML = ""; $("end").classList.add("hidden");
   window.scrollTo({ top: 0 });
+  // Fetch page 1
   loadPage();
 }
+// Submitting the form searches (preventDefault stops a page reload)
 $("form").addEventListener("submit", (e) => { e.preventDefault(); startSearch([]); });
 
 // ---------- research agent ----------
+// Agent answer (simple Markdown) to HTML
 function renderAnswer(md) {
+  // In-line formatting via regex ($1 = text in the first (...) group)
   const inline = (s) => s
+    // **bold**
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    // *italic*
     .replace(/\*(.+?)\*/g, "<em>$1</em>")
+    // [arXiv id] -> link to the cited paper's card
     .replace(/\[([A-Za-z0-9.\-\/]+)\]/g, '<a class="cite" href="#cited-$1">[$1]</a>');
+  // Output so far; list = "ol", "ul" or null
   let html = "", list = null;
   for (const raw of esc(md).split("\n")) {   // escape first: model output is untrusted
     const line = raw.trim();
+    // Numbered ("1. ") or bullet ("- ") line? null if not
     const ol = line.match(/^\d+[.)]\s+(.*)/), ul = line.match(/^[-*•]\s+(.*)/);
     if (ol || ul) {
       const tag = ol ? "ol" : "ul";
+      // Open a list of this type, closing another one first
       if (list !== tag) { if (list) html += `</${list}>`; html += `<${tag}>`; list = tag; }
+      // Add the item, go to the next line
       html += `<li>${inline((ol || ul)[1])}</li>`; continue;
     }
+    // Normal line: close any open list
     if (list) { html += `</${list}>`; list = null; }
+    // "# Heading" -> bold paragraph, else a paragraph
     if (line.startsWith("#")) html += `<p><strong>${inline(line.replace(/^#+\s*/, ""))}</strong></p>`;
     else if (line) html += `<p>${inline(line)}</p>`;
   }
+  // Close a list left open
   return html + (list ? `</${list}>` : "");
 }
 
+// Open agent stream and the 1-second clock
 let source = null, timer = null;
+// End a run: stop clock, close stream, show msg, re-enable button
 function stopAgent(msg) {
   clearInterval(timer);
   if (source) { source.close(); source = null; }
   $("agent-status").innerHTML = msg;
   $("agent-btn").disabled = !agentAvailable;
 }
+// × closes the agent panel
 $("agent-close").addEventListener("click", () => { stopAgent(""); $("agent").classList.add("hidden"); });
 
+// "Research with agent" button
 $("agent-btn").addEventListener("click", () => {
   const q = $("q").value.trim();
+  // Too short: hint and stop
   if (q.length < 3) { $("q").focus(); $("q").placeholder = "Type a research question first…"; return; }
+  // Close a run still going
   if (source) source.close();
+  // Show and empty the agent panel, disable the button
   $("welcome").classList.add("hidden");
   $("agent").classList.remove("hidden");
   $("steps").innerHTML = ""; $("answer").innerHTML = ""; $("agent-papers").innerHTML = "";
   $("agent-btn").disabled = true;
+  // Start time (ms)
   const t0 = Date.now();
+  // Time of the last message from the server (for the watchdog below)
+  let lastEvent = t0;
+  // Current activity shown in the status line
   let phase = "Planning searches";
-  const tick = () => { $("agent-status").innerHTML = `<span class="spinner"></span>${esc(phase)} · ${Math.round((Date.now() - t0) / 1000)} s`; };
-  tick(); timer = setInterval(tick, 1000);
+  // True once the answer or an error arrived
   let done = false;
+  // Redraw status: spinner, phase, seconds elapsed
+  const tick = () => {
+    // Watchdog: no message for 3 minutes means something is stuck; say so
+    // instead of counting forever (a model step normally takes seconds)
+    if (!done && Date.now() - lastEvent > 180000) {
+      done = true;
+      stopAgent('<span class="warn">No response from the agent for 3 minutes. Check that Ollama is running, then try again.</span>');
+      return;
+    }
+    $("agent-status").innerHTML = `<span class="spinner"></span>${esc(phase)} · ${Math.round((Date.now() - t0) / 1000)} s`;
+  };
+  // Draw now, then every second
+  tick(); timer = setInterval(tick, 1000);
 
+  // If anything below throws, stop the clock and show the error: otherwise the
+  // status would keep counting "Planning searches" forever with nothing happening
+  try {
+  // Open a stream to /api/agent: the server pushes one message per event run_agent yields.
+  // EventSource opens a persistent one-way connection to the server (Server-Sent Events).
   source = new EventSource("/api/agent?" + new URLSearchParams({ q }));
+  // Runs once per message from the server
   source.onmessage = (msg) => {
+    // Any message means the agent is alive: reset the watchdog
+    lastEvent = Date.now();
+    // The event as an object, e.g. {type: "tool_call", ...}
     const ev = JSON.parse(msg.data);
+    // New line for the steps log
     const step = document.createElement("div");
+    // Model called a tool: log name and arguments
     if (ev.type === "tool_call") {
       step.className = "step call";
       step.innerHTML = `${esc(ev.name.replace(/_/g, " "))} <code>${esc(JSON.stringify(ev.arguments))}</code>`;
       $("steps").appendChild(step); phase = `Running ${ev.name.replace(/_/g, " ")}`;
+    // Tool finished: log the error or "→ N papers: titles"
     } else if (ev.type === "tool_result") {
       step.className = ev.error ? "step err" : "step";
       step.textContent = ev.error || `→ ${ev.n_papers} papers` + (ev.n_papers ? ": " + ev.papers.slice(0, 2).map((p) => p.title).join(" · ") + (ev.n_papers > 2 ? " …" : "") : "");
       $("steps").appendChild(step); phase = "Reading results";
+    // Guardrail asked the model to search more
     } else if (ev.type === "nudge") {
       step.className = "step"; step.textContent = "Asked to cover the remaining aspects before answering";
       $("steps").appendChild(step); phase = "Planning more searches";
+    // Final answer: render it and the cited paper cards
     } else if (ev.type === "final") {
       done = true;
       $("answer").innerHTML = renderAnswer(ev.answer);
       ev.papers.forEach((p, i) => $("agent-papers").appendChild(paperCard(p, i + 1, "cited-")));
+      // Summary: time, tool calls, cited papers
       let note = `Done in ${ev.seconds} s · ${ev.steps} tool call${ev.steps === 1 ? "" : "s"} · ${ev.papers.length} cited papers, all verified`;
+      // Mention dropped citations the model invented
       if (ev.unverified_ids.length) note += ` · <span class="warn">ignored ${ev.unverified_ids.length} unverified citation(s)</span>`;
       stopAgent(note);
+    // Server reported an error
     } else if (ev.type === "error") {
       done = true; stopAgent(`<span class="warn">Agent error: ${esc(ev.message)}</span>`);
+    // Stream ended without an answer
     } else if (ev.type === "done" && !done) {
       stopAgent("Stopped.");
     }
   };
+  // Connection lost: stop (otherwise EventSource reconnects and reruns the agent)
   source.onerror = () => { if (!done) stopAgent('<span class="warn">Connection to the agent was lost.</span>'); };
+  } catch (err) {
+    done = true;
+    stopAgent(`<span class="warn">The agent failed to start: ${esc(err.message)}</span>`);
+  }
 });
 </script>
 </body>
