@@ -5,10 +5,10 @@ from contextlib import contextmanager
 from typing import Any
 
 import pytest
+from fakes import DownModel
 from fastapi.testclient import TestClient
 
 from papergraph import search as svc
-from papergraph.agent.llm import LLMError
 from papergraph.api import main
 from papergraph.config import get_settings
 from papergraph.query import Understood
@@ -190,13 +190,7 @@ def test_agent_rejects_bad_questions(client: TestClient, q: str) -> None:
 def test_agent_failure_is_streamed_as_an_error_event(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class DownModel:
-        def __init__(self, *args: Any, **kwargs: Any) -> None: ...
-
-        def chat(self, messages: Any, tools: Any) -> Any:
-            raise LLMError("cannot reach Ollama")
-
-    monkeypatch.setattr(main, "OllamaClient", DownModel)
+    monkeypatch.setattr(main, "chat_model", lambda **kwargs: DownModel())
     resp = client.get("/api/agent", params={"q": "what is retrieval-augmented generation"})
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/event-stream")

@@ -39,7 +39,8 @@ goal.
    model (Qwen3 via Ollama, free) plans searches over the index, reads results,
    searches again, and returns an answer citing only papers it retrieved.
    Tools: local search (with filters), paper lookup, similar papers, live arXiv
-   API for preprints newer than the snapshot. Agent loop written by hand.
+   API for preprints newer than the snapshot. Built with LangChain
+   (`create_agent` on LangGraph, `ChatOllama`), guardrails as middleware.
 
 Deferred (not core): seed-paper recommendations, daily arXiv updates.
 Cut: full-text deep-dive Q&A, citation graph.
@@ -124,6 +125,10 @@ Rigor rules:
   and `allenai/specter2` kept for comparison
 - Reranker: none in the product (M4b). `mixedbread-ai/mxbai-rerank-xsmall-v1`
   and `BAAI/bge-reranker-v2-m3` stay available to eval configs
+- Agent: LangChain 1.x (`langchain.agents.create_agent`, LangGraph) with
+  `langchain-ollama`'s `ChatOllama` on local Qwen3 8B. Guardrails (step limit
+  with a forced answer, repeated-call detection, nudge, tool errors) are
+  middleware in `agent/loop.py`; citation checks run on the tool artifacts.
 - LLM: Claude via the `anthropic` SDK (`claude-sonnet-5-5` generator,
   `claude-opus-5-5` judge). Key from `ANTHROPIC_API_KEY` in `.env`, never committed.
 - API: FastAPI. Tracing: Arize Phoenix, self-hosted.
@@ -222,6 +227,8 @@ A milestone is done only when its eval or test evidence exists.
 ## Conventions
 
 - Type hints everywhere. Keep core modules as small pure functions so they are easy to test.
-- No LangChain or LlamaIndex. Build the primitives by hand to learn them.
+- The agent uses LangChain (changed from "no LangChain" on 2026-11-20 at the
+  owner's request). Retrieval, ranking, evals and metrics stay hand-built: no
+  LangChain retrievers or LlamaIndex there.
 - Claims in the README or REPORT must link to a run directory.
 - Update the milestone checklist above as work lands.

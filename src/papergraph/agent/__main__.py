@@ -6,9 +6,9 @@ uv run --group embed python -m papergraph.agent "your research question" [--sche
 import argparse
 import json
 
-from papergraph.agent.llm import DEFAULT_MODEL, OllamaClient
+from papergraph.agent.llm import DEFAULT_MODEL, chat_model
 from papergraph.agent.loop import run_agent
-from papergraph.agent.tools import Toolbox
+from papergraph.agent.tools import make_tools
 from papergraph.db import connect
 
 
@@ -23,9 +23,8 @@ def main() -> None:
     args = parser.parse_args()
 
     with connect(args.schema, autocommit=True) as conn:
-        for event in run_agent(
-            args.question, OllamaClient(args.model, think=args.think), Toolbox(conn)
-        ):
+        model = chat_model(args.model, think=args.think)
+        for event in run_agent(args.question, model, make_tools(conn)):
             d = event.data
             if event.type == "tool_call":
                 print(f"\n[step {d['step']}] {d['name']}({json.dumps(d['arguments'])})")

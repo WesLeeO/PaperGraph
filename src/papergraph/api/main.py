@@ -23,9 +23,9 @@ from psycopg_pool import ConnectionPool
 
 from papergraph import __version__
 from papergraph import search as svc
-from papergraph.agent.llm import DEFAULT_MODEL, OllamaClient
+from papergraph.agent.llm import chat_model
 from papergraph.agent.loop import Event, run_agent
-from papergraph.agent.tools import Toolbox
+from papergraph.agent.tools import make_tools
 from papergraph.db import check_database, create_pool
 from papergraph.doctor import check_ollama
 from papergraph.ingest.arxiv import ML_CATEGORIES
@@ -41,7 +41,7 @@ def _warm_up(pool: ConnectionPool) -> None:
     try:
         with pool.connection() as conn:
             svc.search(conn, "warm up the embedding model", k=1)
-        OllamaClient(DEFAULT_MODEL).chat([{"role": "user", "content": "Say OK."}], None)
+        chat_model().invoke("Say OK.")
         print("warm-up done: models loaded", flush=True)
     except Exception as e:  # warm-up is best effort
         print(f"warm-up skipped: {e}", flush=True)
@@ -169,7 +169,7 @@ def api_agent(
     def events() -> Iterator[str]:
         try:
             with pool.connection() as conn:
-                for event in run_agent(q, OllamaClient(think=think), Toolbox(conn)):
+                for event in run_agent(q, chat_model(think=think), make_tools(conn)):
                     yield f"data: {event.to_json()}\n\n"
         except Exception as e:  # surface failures in the UI instead of a dropped stream
             yield f"data: {Event('error', {'message': f'{type(e).__name__}: {e}'}).to_json()}\n\n"

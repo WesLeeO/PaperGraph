@@ -1,50 +1,27 @@
-"""The agent's tools: what it can do in the world, described for the model.
+"""The agent's tools: what it can do in the world, as LangChain tools.
 
-Each tool is a JSON-schema description the model reads (name, purpose,
-arguments) plus the Python function that runs it. Results go back to the model
-as compact text (every token counts in a small model's context) and to the UI
-as structured paper records.
+Each tool is a Python function decorated with LangChain's `@tool`: its name,
+docstring and typed arguments become the JSON schema the model reads (no
+hand-written schemas). `response_format="content_and_artifact"` makes each tool
+return two things: compact text for the model (every token counts in a small
+model's context) and the structured paper records, which travel on the
+ToolMessage as its `artifact` for the UI and the citation check.
 """
 
 import re
 import time
 import xml.etree.ElementTree as ET
-from collections.abc import Callable
-from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 import psycopg
+from langchain_core.tools import BaseTool, tool
 
 from papergraph import search as svc
 from papergraph.retrieval.filters import Filters
 from papergraph.search import Paper
 
 ABSTRACT_CHARS = 350  # per paper in tool results; get_paper returns the full abstract
-
-
-@dataclass
-class ToolResult:
-    text: str  # what the model reads
-    papers: list[Paper] = field(default_factory=list)  # what the UI shows
-
-
-@dataclass(frozen=True)
-class Tool:
-    name: str
-    description: str
-    parameters: dict[str, Any]  # JSON schema
-    run: Callable[..., ToolResult]
-
-    def spec(self) -> dict[str, Any]:
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": self.parameters,
-            },
-        }
 
 
 def format_paper(p: Paper, full: bool = False) -> str:
@@ -148,91 +125,76 @@ def fetch_arxiv(query: str, max_results: int, http: httpx.Client) -> list[Paper]
     return parse_arxiv_feed(resp.text)
 
 
-# --- the toolbox ------------------------------------------------------------------
+# --- the tools ----------------------------------------------------------------------
+
+Result = tuple[str, list[Paper]]  # (text for the model, papers for the UI)
 
 
-class Toolbox:
-    """The agent's tools, bound to a database connection."""
+def make_tools(conn: psycopg.Connection, http: httpx.Client | None = None) -> list[BaseTool]:
+    """The agent's tools, bound to a database connection (and an HTTP client for arXiv).
 
-    def __init__(self, conn: psycopg.Connection, http: httpx.Client | None = None) -> None:
-        self.conn = conn
-        self.http = http or httpx.Client(
-            timeout=20, headers={"User-Agent": "PaperGraph research agent (educational project)"}
-        )
-        self.tools = {t.name: t for t in self._build()}
+    Errors raised inside a tool, unknown tool names and invalid arguments are
+    turned into messages the model can read by the agent's ToolErrorMiddleware
+    (papergraph.agent.loop), so the tools themselves just raise.
+    """
+    client = http or httpx.Client(
+        timeout=20, headers={"User-Agent": "PaperGraph research agent (educational project)"}
+    )
 
-    def specs(self) -> list[dict[str, Any]]:
-        return [t.spec() for t in self.tools.values()]
-
-    def run(self, name: str, arguments: dict[str, Any]) -> ToolResult:
-        """Run a tool; errors come back as text the model can read and correct."""
-        tool = self.tools.get(name)
-        if tool is None:
-            return ToolResult(f"Error: unknown tool {name!r}. Available: {', '.join(self.tools)}.")
-        required = tool.parameters.get("required", [])
-        missing = [a for a in required if not arguments.get(a)]
-        if missing:
-            return ToolResult(f"Error: {name} needs argument(s) {', '.join(missing)}.")
-        allowed = set(tool.parameters.get("properties", {}))
-        args = {k: v for k, v in arguments.items() if k in allowed}  # drop invented arguments
-        try:
-            return tool.run(**args)
-        except Exception as e:  # report to the model instead of crashing the loop
-            return ToolResult(f"Error running {name}: {type(e).__name__}: {e}")
-
-    # Tool implementations -------------------------------------------------------
-
+    @tool(response_format="content_and_artifact", parse_docstring=True)
     def search_papers(
-        self,
         query: str,
-        year_from: Any = None,
-        year_to: Any = None,
-        venues: Any = None,
-        k: Any = 8,
-    ) -> ToolResult:
+        year_from: int | None = None,
+        year_to: int | None = None,
+        venues: list[str] | str | None = None,
+        k: int = 8,
+    ) -> Result:
+        """Search the local index of ~581k arXiv ML papers (up to late 2026). Main tool. Use short, specific queries.
+
+        Args:
+            query: short search query
+            year_from: earliest year
+            year_to: latest year
+            venues: only these venues, e.g. ['ICLR', 'NeurIPS']
+            k: number of results (max 15)
+        """  # noqa: E501
         filters = Filters(
             year_from=clamp(year_from, 1990, 2100, 0) or None,
             year_to=clamp(year_to, 1990, 2100, 0) or None,
             venues=as_list(venues),
         )
-        papers = svc.search(self.conn, str(query), k=clamp(k, 1, 15, 8), filters=filters)
-        return ToolResult(format_papers(papers), papers)
+        papers = svc.search(conn, query, k=clamp(k, 1, 15, 8), filters=filters)
+        return format_papers(papers), papers
 
-    def get_paper(self, paper_id: str) -> ToolResult:
-        paper = svc.get_paper(self.conn, str(paper_id).strip("[] "))
-        if paper is None:
-            return ToolResult(f"No paper with id {paper_id!r} in the local index.")
-        return ToolResult(format_paper(paper, full=True), [paper])
-
-    def similar_papers(self, paper_id: str, k: Any = 8) -> ToolResult:
-        papers = svc.similar_papers(self.conn, str(paper_id).strip("[] "), k=clamp(k, 1, 15, 8))
-        if not papers:
-            return ToolResult(f"No embedding for paper {paper_id!r}; try search_papers instead.")
-        return ToolResult(format_papers(papers), papers)
-
+    @tool(response_format="content_and_artifact", parse_docstring=True)
     def papers_by_author(
-        self,
         name: str,
-        query: Any = None,
-        year_from: Any = None,
-        year_to: Any = None,
-        k: Any = 10,
-    ) -> ToolResult:
+        query: str | None = None,
+        year_from: int | None = None,
+        year_to: int | None = None,
+        k: int = 10,
+    ) -> Result:
+        """Papers written by a given person (all spellings of the name). Use this for any question about a specific author; search_papers does NOT search author names. Optionally rank the author's papers by a topic.
+
+        Args:
+            name: e.g. 'Yann LeCun'
+            query: optional topic to rank their papers by
+            year_from: earliest year
+            year_to: latest year
+            k: number of results (max 20)
+        """  # noqa: E501
         filters = Filters(
             year_from=clamp(year_from, 1990, 2100, 0) or None,
             year_to=clamp(year_to, 1990, 2100, 0) or None,
         )
         variants, papers = svc.author_papers(
-            self.conn,
-            str(name),
-            query=str(query) if query else None,
-            k=clamp(k, 1, 20, 10),
-            filters=filters,
+            conn, name, query=query or None, k=clamp(k, 1, 20, 10), filters=filters
         )
         if not variants:
-            return ToolResult(
+            return (
                 f"No author matching {name!r} in the index. Check the spelling, or try the "
-                "surname alone."
+                "surname alone.",
+                [],
             )
         names = ", ".join(f"{n} ({c} papers)" for n, c in variants)
         order = f"ranked by relevance to {query!r}" if query else "newest first"
@@ -243,91 +205,42 @@ class Toolbox:
             f"ALL {len(papers)} papers below are co-authored by {name} "
             f"(name spellings found: {names}){years}, {order}:"
         )
-        return ToolResult(header + "\n" + format_papers(papers), papers)
+        return header + "\n" + format_papers(papers), papers
 
-    def search_arxiv(self, query: str, max_results: Any = 5) -> ToolResult:
-        papers = fetch_arxiv(str(query), clamp(max_results, 1, 10, 5), self.http)
-        return ToolResult(format_papers(papers), papers)
+    @tool(response_format="content_and_artifact", parse_docstring=True)
+    def get_paper(paper_id: str) -> Result:
+        """Get one paper's full abstract and metadata by its id.
 
-    def _build(self) -> list[Tool]:
-        return [
-            Tool(
-                "search_papers",
-                "Search the local index of ~581k arXiv ML papers (up to late 2026). "
-                "Main tool. Use short, specific queries.",
-                {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "short search query"},
-                        "year_from": {"type": "integer", "description": "earliest year"},
-                        "year_to": {"type": "integer", "description": "latest year"},
-                        "venues": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "only these venues, e.g. ['ICLR', 'NeurIPS']",
-                        },
-                        "k": {"type": "integer", "description": "number of results (max 15)"},
-                    },
-                    "required": ["query"],
-                },
-                self.search_papers,
-            ),
-            Tool(
-                "papers_by_author",
-                "Papers written by a given person (all spellings of the name). Use this for "
-                "any question about a specific author; search_papers does NOT search author "
-                "names. Optionally rank the author's papers by a topic.",
-                {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "description": "e.g. 'Yann LeCun'"},
-                        "query": {
-                            "type": "string",
-                            "description": "optional topic to rank their papers by",
-                        },
-                        "year_from": {"type": "integer"},
-                        "year_to": {"type": "integer"},
-                        "k": {"type": "integer", "description": "number of results (max 20)"},
-                    },
-                    "required": ["name"],
-                },
-                self.papers_by_author,
-            ),
-            Tool(
-                "get_paper",
-                "Get one paper's full abstract and metadata by its id.",
-                {
-                    "type": "object",
-                    "properties": {"paper_id": {"type": "string"}},
-                    "required": ["paper_id"],
-                },
-                self.get_paper,
-            ),
-            Tool(
-                "similar_papers",
-                "Find papers most similar to a given paper (by embedding).",
-                {
-                    "type": "object",
-                    "properties": {
-                        "paper_id": {"type": "string"},
-                        "k": {"type": "integer", "description": "number of results (max 15)"},
-                    },
-                    "required": ["paper_id"],
-                },
-                self.similar_papers,
-            ),
-            Tool(
-                "search_arxiv",
-                "Live search of arXiv for the newest preprints, newest first. "
-                "Slow; only for very recent work.",
-                {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "a few key terms"},
-                        "max_results": {"type": "integer", "description": "max 10"},
-                    },
-                    "required": ["query"],
-                },
-                self.search_arxiv,
-            ),
-        ]
+        Args:
+            paper_id: the paper's id, e.g. '2310.06825'
+        """
+        paper = svc.get_paper(conn, paper_id.strip("[] "))
+        if paper is None:
+            return f"No paper with id {paper_id!r} in the local index.", []
+        return format_paper(paper, full=True), [paper]
+
+    @tool(response_format="content_and_artifact", parse_docstring=True)
+    def similar_papers(paper_id: str, k: int = 8) -> Result:
+        """Find papers most similar to a given paper (by embedding).
+
+        Args:
+            paper_id: the paper's id, e.g. '2310.06825'
+            k: number of results (max 15)
+        """
+        papers = svc.similar_papers(conn, paper_id.strip("[] "), k=clamp(k, 1, 15, 8))
+        if not papers:
+            return f"No embedding for paper {paper_id!r}; try search_papers instead.", []
+        return format_papers(papers), papers
+
+    @tool(response_format="content_and_artifact", parse_docstring=True)
+    def search_arxiv(query: str, max_results: int = 5) -> Result:
+        """Live search of arXiv for the newest preprints, newest first. Slow; only for very recent work.
+
+        Args:
+            query: a few key terms
+            max_results: max 10
+        """  # noqa: E501
+        papers = fetch_arxiv(query, clamp(max_results, 1, 10, 5), client)
+        return format_papers(papers), papers
+
+    return [search_papers, papers_by_author, get_paper, similar_papers, search_arxiv]

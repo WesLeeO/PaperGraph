@@ -143,7 +143,7 @@ make agent Q="Which methods reduce hallucination in retrieval-augmented generati
 your interest ────────┤                                                 ├─ fusion (RRF) ─ results
                       └─ semantic search (Qwen3-Embedding-0.6B, pgvector) ┘
 
-research question ─ agent loop (Qwen3 8B via Ollama, running locally)
+research question ─ LangChain agent (Qwen3 8B via Ollama, running locally)
                       ├─ search_papers   the search pipeline above, with filters
                       ├─ get_paper       read a paper's full abstract
                       ├─ similar_papers  "more like this"
@@ -161,9 +161,12 @@ research question ─ agent loop (Qwen3 8B via Ollama, running locally)
 - **No reranker, on purpose.** Cross-encoders gave +0.04 nDCG@10 on top of a
   bge-small hybrid, but nothing significant on top of Qwen3 embeddings, so
   the product skips them and saves ~1 s per search.
-- **Agent.** A hand-written tool-calling loop with guardrails: a step limit,
-  repeated-call detection, tool errors fed back to the model, citation
-  checking, and a nudge when the model tries to answer after a single search.
+- **Agent.** Built with [LangChain](https://python.langchain.com): `create_agent`
+  (LangGraph) runs the tool-calling loop with `ChatOllama` on a local Qwen3
+  model. Guardrails are LangChain middleware: a step limit that forces a final
+  answer, repeated-call detection, tool errors fed back to the model, and a
+  nudge when the model tries to answer after a single search. Citations are
+  checked against the papers the tools actually returned.
 
 Every design choice is measured on the [LitSearch](https://huggingface.co/datasets/princeton-nlp/LitSearch)
 benchmark, with bootstrap confidence intervals and paired comparisons:
